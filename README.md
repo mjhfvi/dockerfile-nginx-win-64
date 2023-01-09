@@ -9,3 +9,7 @@ https://nginx.org/en/docs/howto_build_on_win32.html
 https://www.youtube.com/watch?v=M-cj-p4rZtU 
 
 build tool visual studio 2017
+
+some manual changes to makefile to support windows and visual studio 2017
+
+download all the files, and run docker build in the same folder
