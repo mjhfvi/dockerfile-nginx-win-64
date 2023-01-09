@@ -7,3 +7,5 @@ Sources i used:
 https://nginx.org/en/docs/howto_build_on_win32.html 
 
 https://www.youtube.com/watch?v=M-cj-p4rZtU 
+
+build tool visual studio 2017
