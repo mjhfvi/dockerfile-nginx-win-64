@@ -3,24 +3,32 @@
 ARG BASE_OS_VERSION=mcr.microsoft.com/windows/servercore:ltsc2019
 FROM ${BASE_OS_VERSION} AS INSTALLER
 
-#ENV NGINX_BRANCH_VERSION=branches/stable-1.20
+# Set default version if not provided during build
+ARG DEFAULT_VERSION=1.24
+ENV VERSION=${NGINX_BRANCH_VERSION:-$DEFAULT_VERSION}
 
 # Restore the default Windows shell for correct batch processing.
 SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'Continue'; $verbosePreference='Continue';"]
 
-# Install Chocolatey
-ENV CHOCO_URL=https://chocolatey.org/install.ps1
-RUN Set-ExecutionPolicy Bypass -Scope Process -Force; `
-    [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]'Tls,Tls11,Tls12'; `
-    iex ((New-Object System.Net.WebClient).DownloadString("$env:CHOCO_URL")); `
-    refreshenv;
+### Chocolatey Setup ####
+# set chocolatey version
+ENV chocolateyVersion=1.4.0
 
-# Install  Chocolatey Tools From
-RUN choco install git strawberryperl sed 7zip -y; `
-    [Environment]::SetEnvironmentVariable('PATH', $env:PATH, [EnvironmentVariableTarget]::User)
+# Install Chocolatey
+RUN Set-ExecutionPolicy Bypass -Scope Process -Force; iex ((New-Object System.Net.WebClient).DownloadString('https://chocolatey.org/install.ps1'))
+
+# Updates the environment variables of the current powershell session
+RUN [Environment]::SetEnvironmentVariable('PATH', $env:PATH, [EnvironmentVariableTarget]::User)
+
+# Verify Chocolatey is installed
+RUN choco --version
+
+# Install  Chocolatey Tools
+RUN choco install git strawberryperl sed 7zip -y
+### Chocolatey Setup ####
 
 # Clone Nginx Repository
-RUN git clone https://github.com/nginx/nginx.git
+RUN git clone -b branches/stable-$env:VERSION https://github.com/nginx/nginx.git
 
 # Install Build Tools
 RUN New-Item -ItemType Directory -Path C:\nginx\objs\lib\ -Force; `
@@ -49,21 +57,28 @@ RUN New-Item -ItemType Directory -Path C:\nginx\objs\lib\ -Force; `
     Write-Host "Downloading Visual Studio Build Tools"; `
 	Invoke-WebRequest -OutFile vs_buildtools.exe -UseBasicParsing "https://aka.ms/vs/15/release/vs_buildtools.exe"
 
-# Install Visual Studio Build Tools, Find Tools: https://learn.microsoft.com/en-us/visualstudio/install/use-command-line-parameters-to-install-visual-studio
-RUN c:\vs_buildtools.exe --noUpdateInstaller --quiet --wait --norestart --nocache `
+# Install Visual Studio Build Tools, Change Tools: https://learn.microsoft.com/en-us/visualstudio/install/use-command-line-parameters-to-install-visual-studio
+SHELL ["cmd", "/S", "/C"]
+RUN c:\vs_buildtools.exe --noUpdateInstaller --quiet --wait --norestart --nocache --installPath "C:\\BuildTools"`
 	--add Microsoft.VisualStudio.Workload.MSBuildTools `
 	--add Microsoft.VisualStudio.Workload.VCTools `
 	--add Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
 	--add Microsoft.VisualStudio.Component.VC.CMake.Project `
 	--add Microsoft.VisualStudio.Component.TestTools.BuildTools `
 	--add Microsoft.VisualStudio.Component.VC.ASAN `
-	--add Microsoft.VisualStudio.Component.VC.141 `
 	--add Microsoft.VisualStudio.Component.VC.CMake.Project `
 	--add Microsoft.VisualStudio.Component.VC.ATL `
-	--add Microsoft.VisualStudio.Component.VC.ASAN
+	|| IF "%ERRORLEVEL%"=="3010" EXIT 0 `
+    `
+    # Cleanup
+    && del /q vs_buildtools.exe
 
 # Set System Variables
-RUN [Environment]::SetEnvironmentVariable('C:\tools\msys64;c:\msys64;c:\nasm;C:\Program Files (x86)\Microsoft Visual Studio\2017\BuildTools\VC\Tools\MSVC\14.16.27023\bin\Hostx64\x64', $env:PATH, [EnvironmentVariableTarget]::User)
+SHELL ["cmd", "/S", "/C"]
+RUN setx /M path "%path%;C:\tools\msys64;c:\msys64;c:\nasm;C:\BuildTools\VC\Tools\MSVC\14.16.27023\bin\Hostx64\x64\"
+
+# Change Shell Powrshell
+SHELL ["powershell", "-Command", "$ErrorActionPreference = 'Stop'; $ProgressPreference = 'Continue'; $verbosePreference='Continue';"]
 
 # Replace Default Document With Edit One
 WORKDIR C:/nginx
@@ -75,13 +90,15 @@ RUN Remove-Item -Path c:/nginx/auto/lib/openssl/makefile.msvc; `
 
 # Run the Compile Process
 SHELL ["cmd", "/S", "/C"]
+
 RUN ["C:\\Program Files\\git\\bin\\sh.exe", "C:\\nginx\\compile-nginx.sh"]
 
-# Compile the Build, MUST run in CMD "x64 Native Tools Command Prompt for VS 2017" with administrator privileges
-SHELL ["cmd", "/k", "\"C:\\Program Files (x86)\\Microsoft Visual Studio\\2017\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\"", "amd64", "&&"]
+# Change Shell x64 Native Tools Command Prompt
+SHELL ["cmd", "/k", "\"C:\\BuildTools\\VC\\Auxiliary\\Build\\vcvars64.bat\"", "amd64", "&&"]
+
 WORKDIR C:/nginx
 USER ContainerAdministrator
-RUN nmake /f C:/nginx/objs/Makefile
+RUN nmake.exe /f C:/nginx/objs/Makefile
 
 # Verify the Nginx Version
 RUN C:/nginx/objs/nginx.exe -v
@@ -89,11 +106,20 @@ RUN C:/nginx/objs/nginx.exe -v
 # Build the Nginx Image for Windows Nano 2019
 FROM mcr.microsoft.com/windows/nanoserver:ltsc2019
 
-RUN mkdir c:\nginx
+# Building Nginx Folder Structure
+RUN mkdir C:\nginx C:\nginx\conf C:\nginx\logs C:\nginx\temp
 
 # Getting the Nginx File from the Previous Build Stage
 COPY --from=INSTALLER C:\nginx\objs\nginx.exe C:\nginx\
+COPY --from=INSTALLER C:\nginx\conf\. C:\nginx\conf\
+
+LABEL "NGINX_VERSION"="$env:VERSION"
+LABEL "OS_VERSION"="nanoserver:ltsc2019"
+
+WORKDIR C:/nginx
 
 EXPOSE 80
 
-CMD ["cmd /S /C \"C:\\nginx\\nginx.exe\""]
+ENTRYPOINT ["nginx"]
+
+CMD ["-g", "daemon off;"]
